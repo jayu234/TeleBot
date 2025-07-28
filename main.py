@@ -21,7 +21,7 @@ HEADERS = {
                   'AppleWebKit/537.36 (KHTML, like Gecko) '
                   'Chrome/120.0.0.0 Safari/537.36'
 }
-NSE_API = 'https://www.nseindia.com/api/option-chain-equities?symbol={}'
+NSE_API = 'https://www.nseindia.com/api/option-chain-indices?symbol=NIFTY'
 
 
 def fetch_option_chain(symbol: str):
