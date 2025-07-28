@@ -98,3 +98,5 @@ threading.Thread(target=schedule_reports, daemon=True).start()
 @app.get("/")
 def read_root():
     return {"status": "Bot is running"}
+    
+send_report()
