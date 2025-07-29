@@ -50,30 +50,55 @@ def create_nse_session():
     return nse_session
 
 def initialize_nse_session():
-    """Initialize session by visiting NSE pages"""
-    try:
-        response = nse_session.get('https://www.nseindia.com', timeout=15)
-        if response.status_code != 200:
-            return False
-        
-        nse_session.get('https://www.nseindia.com/market-data', timeout=15)
-        nse_session.get('https://www.nseindia.com/option-chain', timeout=15)
-        time.sleep(2)
-        
-        api_headers = {
-            'Accept': 'application/json, text/plain, */*',
-            'Referer': 'https://www.nseindia.com/option-chain',
-            'X-Requested-With': 'XMLHttpRequest',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin'
-        }
-        nse_session.headers.update(api_headers)
-        return True
-        
-    except Exception as e:
-        print(f"❌ Session initialization failed: {e}")
-        return False
+    """Initialize session by visiting NSE pages with better error handling"""
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"🔄 NSE session attempt {attempt + 1}/{max_retries}")
+            
+            # Try with longer timeout for production
+            response = nse_session.get('https://www.nseindia.com', timeout=30)
+            if response.status_code != 200:
+                print(f"⚠️  Homepage returned {response.status_code}")
+                if attempt < max_retries - 1:
+                    time.sleep(5)
+                    continue
+                return False
+            
+            # Visit market pages with shorter timeouts
+            try:
+                nse_session.get('https://www.nseindia.com/market-data', timeout=20)
+                nse_session.get('https://www.nseindia.com/option-chain', timeout=20)
+            except Exception as e:
+                print(f"⚠️  Secondary pages failed: {e}")
+                # Continue anyway, main page worked
+            
+            time.sleep(2)
+            
+            # Update headers for API calls
+            api_headers = {
+                'Accept': 'application/json, text/plain, */*',
+                'Referer': 'https://www.nseindia.com/option-chain',
+                'X-Requested-With': 'XMLHttpRequest',
+                'Sec-Fetch-Dest': 'empty',
+                'Sec-Fetch-Mode': 'cors',
+                'Sec-Fetch-Site': 'same-origin'
+            }
+            nse_session.headers.update(api_headers)
+            
+            print(f"✅ NSE session initialized on attempt {attempt + 1}")
+            return True
+            
+        except Exception as e:
+            print(f"❌ NSE session attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                print(f"⏳ Retrying in 10 seconds...")
+                time.sleep(10)
+            else:
+                print("❌ All NSE session attempts failed")
+                return False
+    
+    return False
 
 def get_nse_option_chain(symbol: str):
     """Fetch option chain data from NSE API"""
@@ -105,15 +130,41 @@ def get_nse_option_chain(symbol: str):
 def analyze_option_data(symbol: str) -> str:
     """Generate option chain analysis"""
     try:
+        # Ensure NSE session is working
         if not nse_session or len(nse_session.cookies) == 0:
+            print(f"🔄 Reinitializing NSE session for {symbol}")
             create_nse_session()
             if not initialize_nse_session():
-                return f"❌ Could not establish NSE session for {symbol.upper()}"
+                return f"""❌ NSE service temporarily unavailable for *{symbol.upper()}*
+
+🔧 **Possible reasons:**
+• NSE servers are blocking this IP
+• Network connectivity issues
+• NSE API temporarily down
+
+💡 **Try again in a few minutes**
+
+⚠️ *This commonly happens with cloud servers*"""
         
         records, option_data = get_nse_option_chain(symbol)
         
         if not records or not option_data:
-            return f"❌ No option data available for *{symbol.upper()}*\n\n💡 This symbol may not have active F&O trading"
+            # Try reinitializing session once more
+            print(f"🔄 Retrying NSE session for {symbol}")
+            create_nse_session()
+            if initialize_nse_session():
+                records, option_data = get_nse_option_chain(symbol)
+            
+            if not records or not option_data:
+                return f"""❌ No option data available for *{symbol.upper()}*
+
+🔧 **Possible reasons:**
+• Symbol may not have active F&O trading
+• NSE API blocking requests
+• Data temporarily unavailable
+
+💡 **Try these symbols instead:**
+NIFTY, BANKNIFTY, RELIANCE, TCS, HDFCBANK"""
         
         underlying_value = records.get('underlyingValue', 'N/A')
         expiry_dates = records.get('expiryDates', [])
@@ -173,7 +224,11 @@ def analyze_option_data(symbol: str) -> str:
 **📊 PCR:** `{pcr}` | **🎯 Bias:** {sentiment}"""
         
     except Exception as e:
-        return f"❌ Analysis failed for *{symbol.upper()}*: {str(e)}"
+        return f"""❌ Analysis error for *{symbol.upper()}*
+
+**Error:** {str(e)}
+
+🔄 **Please try again in a few minutes**"""
 
 # Telegram Bot Handlers
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -375,7 +430,7 @@ def start_fastapi():
 def health_check():
     return {
         "status": "NSE Option Bot is running",
-        "nse_session": "active" if nse_session else "inactive",
+        "nse_session": "active" if (nse_session and len(nse_session.cookies) > 0) else "inactive",
         "active_users": len(user_preferences),
         "telegram_bot": "active" if telegram_app else "inactive"
     }
@@ -398,38 +453,100 @@ def get_users():
         "details": user_details
     }
 
+@app.get("/test-nse")
+def test_nse_connection():
+    """Test NSE connectivity"""
+    try:
+        if not nse_session:
+            create_nse_session()
+        
+        # Try a simple request to NSE
+        response = nse_session.get('https://www.nseindia.com', timeout=10)
+        
+        return {
+            "nse_status": "reachable" if response.status_code == 200 else "unreachable",
+            "status_code": response.status_code,
+            "cookies": len(nse_session.cookies),
+            "test_time": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+    except Exception as e:
+        return {
+            "nse_status": "error",
+            "error": str(e),
+            "test_time": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
+@app.post("/retry-nse")
+def retry_nse_connection():
+    """Manually retry NSE session initialization"""
+    try:
+        create_nse_session()
+        success = initialize_nse_session()
+        
+        return {
+            "success": success,
+            "cookies": len(nse_session.cookies) if nse_session else 0,
+            "message": "NSE session reinitialized" if success else "NSE session failed",
+            "retry_time": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+    except Exception as e:
+        return {
+            "success": False,
+            "error": str(e),
+            "retry_time": time.strftime('%Y-%m-%d %H:%M:%S')
+        }
+
 def main():
     """Main function - Telegram bot in main thread, FastAPI in background"""
     global telegram_app, nse_session
     
-    # Initialize NSE session
+    print("🚀 Starting NSE Option Chain Bot...")
+    
+    # Initialize NSE session (don't fail if this doesn't work initially)
     create_nse_session()
     session_ok = initialize_nse_session()
     
+    if not session_ok:
+        print("⚠️  NSE session failed, but continuing anyway. Will retry later.")
+    
     # Start FastAPI in background thread
+    print("🌐 Starting FastAPI server...")
     threading.Thread(target=start_fastapi, daemon=True).start()
     
     # Start scheduler in background thread
+    print("⏰ Starting scheduler...")
     threading.Thread(target=run_scheduler, daemon=True).start()
     
     # Small delay to let FastAPI start
-    time.sleep(2)
+    time.sleep(3)
     
-    # Create Telegram application (in main thread)
-    telegram_app = Application.builder().token(BOT_TOKEN).build()
-    
-    # Add handlers
-    telegram_app.add_handler(CommandHandler("start", start_command))
-    telegram_app.add_handler(CommandHandler("stop", stop_command))
-    telegram_app.add_handler(CommandHandler("status", status_command))
-    telegram_app.add_handler(CallbackQueryHandler(handle_callback_query))
-    telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_symbols))
-    
-    print("🤖 Telegram bot started (main thread)")
-    print("🌐 FastAPI server started (background)")
-    
-    # Run the bot in main thread (this blocks)
-    telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+    try:
+        # Create Telegram application (in main thread)
+        print("🤖 Creating Telegram application...")
+        telegram_app = Application.builder().token(BOT_TOKEN).build()
+        
+        # Add handlers
+        telegram_app.add_handler(CommandHandler("start", start_command))
+        telegram_app.add_handler(CommandHandler("stop", stop_command))
+        telegram_app.add_handler(CommandHandler("status", status_command))
+        telegram_app.add_handler(CallbackQueryHandler(handle_callback_query))
+        telegram_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_symbols))
+        
+        print("✅ Telegram bot configured successfully")
+        print("✅ FastAPI server running in background")
+        print("✅ All systems ready")
+        
+        # Run the bot in main thread (this blocks)
+        telegram_app.run_polling(allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        print(f"❌ Critical error starting bot: {e}")
+        # Fallback: just run FastAPI if Telegram fails
+        print("🔄 Falling back to FastAPI-only mode...")
+        
+        # Keep the process alive for Render
+        while True:
+            time.sleep(60)
 
 if __name__ == "__main__":
     main()
